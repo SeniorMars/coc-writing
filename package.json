@@ -1,0 +1,184 @@
+{
+  "name": "coc-writing",
+  "version": "0.1.0",
+  "description": "WordNet-powered dictionary and thesaurus completion for coc.nvim",
+  "author": "SeniorMars <cjh16@rice.edu>",
+  "license": "MIT",
+  "main": "lib/index.js",
+  "keywords": [
+    "coc.nvim",
+    "wordnet",
+    "dictionary",
+    "thesaurus",
+    "completion",
+    "writing"
+  ],
+  "engines": {
+    "coc": "^0.0.82"
+  },
+  "scripts": {
+    "watch": "node esbuild.mjs --watch",
+    "build": "node esbuild.mjs",
+    "prepare": "node esbuild.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^16.18.0",
+    "coc.nvim": "^0.0.83-next.18",
+    "esbuild": "^0.28.0",
+    "typescript": "^5.3.3"
+  },
+  "activationEvents": [
+    "*"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "coc-writing.definition",
+        "title": "Show WordNet definition for word under cursor"
+      },
+      {
+        "command": "coc-writing.searchDictionary",
+        "title": "Search dictionary for word under cursor"
+      },
+      {
+        "command": "coc-writing.searchThesaurus",
+        "title": "Search thesaurus for word under cursor"
+      },
+      {
+        "command": "coc-writing.health",
+        "title": "Show coc-writing runtime status"
+      }
+    ],
+    "configuration": {
+      "type": "object",
+      "title": "coc-writing",
+      "properties": {
+        "coc-writing.enable": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable coc-writing."
+        },
+        "coc-writing.debug": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show a notification when the WordNet index finishes loading."
+        },
+        "coc-writing.filetypes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "markdown",
+            "text",
+            "tex",
+            "plaintex",
+            "gitcommit"
+          ],
+          "description": "Filetypes where coc-writing completion sources and lists are active."
+        },
+        "coc-writing.definitionPointers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "!",
+            "&",
+            "^"
+          ],
+          "markdownDescription": "WordNet pointer symbols shown under each definition in the preview window.\n\n| Symbol | Meaning |\n|--------|----------|\n| `!` | Antonym |\n| `&` | Similar to |\n| `^` | Also see |\n| `@` | Hypernym |\n| `~` | Hyponym |\n| `+` | Related form |"
+        },
+        "coc-writing.definitionMaxSynsets": {
+          "type": "number",
+          "default": 8,
+          "minimum": 1,
+          "description": "Maximum number of senses shown per word in the definition preview. Common words can have many senses; this keeps the preview readable."
+        },
+        "coc-writing.dictionary.enable": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable dictionary completion source (prefix word matching with definitions)."
+        },
+        "coc-writing.dictionary.minInputLength": {
+          "type": "number",
+          "default": 3,
+          "minimum": 1,
+          "description": "Minimum characters typed before dictionary completion triggers."
+        },
+        "coc-writing.dictionary.maxItems": {
+          "type": "number",
+          "default": 50,
+          "minimum": 1,
+          "description": "Maximum number of dictionary completion items returned per trigger."
+        },
+        "coc-writing.dictionary.priority": {
+          "type": "number",
+          "default": 20,
+          "description": "Completion source priority. Higher values rank above other sources. Restart coc to apply."
+        },
+        "coc-writing.dictionary.list.showGlosses": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show a short definition beside each word in :CocList writing-dictionary. Disable if interactive search feels slow."
+        },
+        "coc-writing.thesaurus.enable": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Enable thesaurus inline completion. Disabled by default — use `:CocCommand coc-writing.searchThesaurus` or `:CocList writing-thesaurus` for intentional synonym lookup."
+        },
+        "coc-writing.thesaurus.minInputLength": {
+          "type": "number",
+          "default": 4,
+          "minimum": 2,
+          "description": "Minimum characters typed before thesaurus completion triggers. Higher than dictionary to avoid firing mid-word."
+        },
+        "coc-writing.thesaurus.maxItems": {
+          "type": "number",
+          "default": 50,
+          "minimum": 1,
+          "description": "Maximum number of synonyms returned (completion and list)."
+        },
+        "coc-writing.thesaurus.priority": {
+          "type": "number",
+          "default": 30,
+          "description": "Thesaurus completion source priority. Restart coc to apply."
+        },
+        "coc-writing.thesaurus.similarityPointers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "&",
+            "^",
+            "+"
+          ],
+          "markdownDescription": "WordNet pointer symbols used to find similar words.\n\n| Symbol | Meaning | Best for |\n|--------|---------|----------|\n| `&` | Similar to | Adjectives |\n| `^` | Also see | All POS |\n| `+` | Derivationally related | Nouns & Verbs |"
+        },
+        "coc-writing.thesaurus.similarityDepth": {
+          "type": "number",
+          "default": 2,
+          "minimum": 0,
+          "markdownDescription": "Depth of similarity traversal.\n\n- `0` — same synset only (direct synonyms)\n- `1` — same synset + one layer of configured pointers\n- `2` — recurse one more layer\n\nHigher values find more synonyms but are slower."
+        },
+        "coc-writing.dictionary.fuzzy.enable": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable approximate prefix fallback when the typed word has no exact prefix matches. Catches common misspellings like 'sincersly' → 'sincerely'."
+        },
+        "coc-writing.dictionary.fuzzy.minInputLength": {
+          "type": "number",
+          "default": 5,
+          "minimum": 3,
+          "description": "Minimum input length before fuzzy fallback activates. Lower values trigger fuzzy earlier but may produce noisy results on short inputs."
+        },
+        "coc-writing.dictionary.includeMultiword": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Include multi-word expressions (e.g. `single-entry bookkeeping`) in dictionary completion. Disabled by default — single words and hyphenated compounds are shown; space-separated phrases are filtered out."
+        }
+      }
+    }
+  }
+}
