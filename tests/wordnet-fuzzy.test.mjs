@@ -51,6 +51,8 @@ await wordnet.loadIndex("data");
 let stats = wordnet.getWordNetStats();
 assert.equal(stats.deleteIndexBuilt, false);
 assert.equal(stats.deleteIndexSize, 0);
+assert.deepEqual(wordnet.getSpellingSuggestions("definately", 10), []);
+assert.equal(wordnet.getWordNetStats().deleteIndexBuilt, false);
 
 await wordnet.warmSpellingIndex();
 stats = wordnet.getWordNetStats();

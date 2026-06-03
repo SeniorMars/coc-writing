@@ -86,6 +86,7 @@ let dataDir = "";
 let loaded = false;
 let loadPromise: Promise<void> | null = null;
 let deleteIndexPromise: Promise<void> | null = null;
+let deleteIndexBuildGeneration = 0;
 
 const synsetCache = new Map<string, Synset | null>();
 const dataFds = new Map<POSFile, number>();
@@ -94,9 +95,10 @@ const glossCache = new Map<string, string>();
 const fuzzyPrefixCache = new Map<string, string[]>();
 const FUZZY_PREFIX_CACHE_LIMIT = 200;
 const FUZZY_PREFIX_SCORE_CUTOFF = 180;
+const DELETE_INDEX_BUILD_CHUNK_SIZE = 500;
 
 // SymSpell-style delete index: delete-variant -> original lemmas
-let deleteIndex = new Map<string, string[]>();
+let deleteIndex = new Map<string, Set<string>>();
 let deleteIndexBuilt = false;
 // ---------------------------------------------------------------------------
 // Public state API
@@ -165,6 +167,7 @@ export async function loadIndex(dir: string): Promise<void> {
       deleteIndex.clear();
       deleteIndexBuilt = false;
       deleteIndexPromise = null;
+      deleteIndexBuildGeneration++;
       loaded = true;
     } catch (err) {
       // Reset so a future call can retry cleanly.
@@ -176,6 +179,7 @@ export async function loadIndex(dir: string): Promise<void> {
       deleteIndex.clear();
       deleteIndexBuilt = false;
       deleteIndexPromise = null;
+      deleteIndexBuildGeneration++;
       loaded = false;
       throw err;
     }
@@ -198,6 +202,7 @@ export function closeWordNet(): void {
   deleteIndex.clear();
   deleteIndexBuilt = false;
   deleteIndexPromise = null;
+  deleteIndexBuildGeneration++;
   index.clear();
   sortedKeys = [];
   dataDir = "";
@@ -372,51 +377,69 @@ function editsDeletes(word: string, maxDistance: number): Set<string> {
  * Maps every delete-variant of every lemma to the set of original lemmas.
  * maxDistance = 2 handles typos up to 2 edits away.
  */
-function buildDeleteIndex(maxDistance: number): Map<string, string[]> {
+function waitForNextTurn(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+function addDeleteIndexLemma(
+  target: Map<string, Set<string>>,
+  lemma: string,
+  maxDistance: number,
+): void {
+  if (lemma.length < 4) return;
+  if (lemma.length > 24) return;
+  if (lemma.includes("_")) return;
+  if (!/^[a-z'-]+$/.test(lemma)) return;
+
+  for (const del of editsDeletes(lemma, maxDistance)) {
+    const existing = target.get(del) ?? new Set<string>();
+    existing.add(lemma);
+    target.set(del, existing);
+  }
+}
+
+async function buildDeleteIndex(
+  maxDistance: number,
+  generation: number,
+): Promise<Map<string, Set<string>> | null> {
   const tmp = new Map<string, Set<string>>();
 
-  for (const lemma of sortedKeys) {
-    if (lemma.length < 4) continue;
-    if (lemma.length > 24) continue;
-    if (lemma.includes("_")) continue;
-    if (!/^[a-z'-]+$/.test(lemma)) continue;
+  for (let i = 0; i < sortedKeys.length; i++) {
+    if (generation !== deleteIndexBuildGeneration) return null;
+    addDeleteIndexLemma(tmp, sortedKeys[i], maxDistance);
 
-    for (const del of editsDeletes(lemma, maxDistance)) {
-      const existing = tmp.get(del) ?? new Set<string>();
-      existing.add(lemma);
-      tmp.set(del, existing);
+    if ((i + 1) % DELETE_INDEX_BUILD_CHUNK_SIZE === 0) {
+      await waitForNextTurn();
     }
   }
 
-  const out = new Map<string, string[]>();
-  for (const [key, values] of tmp) out.set(key, Array.from(values));
-  return out;
-}
-
-function ensureDeleteIndex(): void {
-  if (deleteIndexBuilt) return;
-  deleteIndex = buildDeleteIndex(2);
-  deleteIndexBuilt = true;
+  return generation === deleteIndexBuildGeneration ? tmp : null;
 }
 
 export function warmSpellingIndex(): Promise<void> {
   if (deleteIndexBuilt) return Promise.resolve();
   if (deleteIndexPromise) return deleteIndexPromise;
 
-  deleteIndexPromise = new Promise((resolve, reject) => {
-    setTimeout(() => {
-      try {
-        ensureDeleteIndex();
-        resolve();
-      } catch (err) {
-        reject(err);
-      } finally {
-        deleteIndexPromise = null;
-      }
-    }, 0);
-  });
+  const generation = deleteIndexBuildGeneration;
+  const promise = (async () => {
+    const built = await buildDeleteIndex(2, generation);
+    if (!built) return;
+    if (generation !== deleteIndexBuildGeneration) return;
+    deleteIndex = built;
+    deleteIndexBuilt = true;
+  })();
 
-  return deleteIndexPromise;
+  deleteIndexPromise = promise;
+  promise.then(
+    () => {
+      if (deleteIndexPromise === promise) deleteIndexPromise = null;
+    },
+    () => {
+      if (deleteIndexPromise === promise) deleteIndexPromise = null;
+    },
+  );
+
+  return promise;
 }
 
 // ---------------------------------------------------------------------------
@@ -524,7 +547,10 @@ export function getSpellingSuggestions(
   const query = normalizeLemma(input);
   if (query.length < 4) return [];
 
-  ensureDeleteIndex();
+  if (!deleteIndexBuilt) {
+    warmSpellingIndex().catch(() => {});
+    return [];
+  }
 
   // Use tighter distance for short words — edit distance 2 is too permissive on 4-5 letter words.
   const effectiveMaxDistance = query.length <= 5 ? 1 : maxDistance;
