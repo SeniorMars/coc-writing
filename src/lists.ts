@@ -15,7 +15,7 @@ import {
   isLoaded,
   lookupWord,
 } from "./wordnet";
-import { openPreviewBuffer } from "./util";
+import { getThesaurusSimilarityPointers, openPreviewBuffer } from "./util";
 
 // ---------------------------------------------------------------------------
 // Module-level pending queries
@@ -103,14 +103,14 @@ async function insertWord(nvim: Neovim, word: string): Promise<void> {
 // ---------------------------------------------------------------------------
 
 export class DictionaryList extends BasicList {
-  public readonly name = "writing-dictionary";
+  public readonly name = "writingDictionary";
   public readonly description = "Search the WordNet dictionary";
   public readonly defaultAction = "replace";
   public readonly interactive = true;
   public actions: ListAction[] = [];
 
   constructor(nvim: Neovim) {
-    super(nvim);
+    super();
 
     this.addAction("replace", async (item: ListItem) => {
       await replaceWordUnderCursor(nvim, item.data.word);
@@ -148,11 +148,11 @@ export class DictionaryList extends BasicList {
       const display = formatWordForDisplay(lemma);
       const gloss = showGlosses ? getFirstGloss(lemma) : "";
       const label = fuzzy
-        ? (gloss ? `~${display}\t${gloss}` : `~${display}`)
-        : (gloss ? `${display}\t${gloss}` : display);
+        ? (gloss ? `~${display} | ${gloss}` : `~${display}`)
+        : (gloss ? `${display} | ${gloss}` : display);
       return {
         label,
-        filterText: display,
+        filterText: fuzzy ? query : display,
         data: { lemma, word: display },
       };
     });
@@ -164,13 +164,13 @@ export class DictionaryList extends BasicList {
 // ---------------------------------------------------------------------------
 
 export class ThesaurusList extends BasicList {
-  public readonly name = "writing-thesaurus";
+  public readonly name = "writingThesaurus";
   public readonly description = "Find synonyms using the WordNet thesaurus";
   public readonly defaultAction = "replace";
   public actions: ListAction[] = [];
 
   constructor(nvim: Neovim) {
-    super(nvim);
+    super();
 
     this.addAction("replace", async (item: ListItem) => {
       await replaceWordUnderCursor(nvim, item.data.word);
@@ -200,12 +200,7 @@ export class ThesaurusList extends BasicList {
     if (lookupWord(query).length === 0) return [];
 
     const cfg = workspace.getConfiguration("coc-writing");
-    // '&' = Similar to (adjective clusters), '^' = Also see, '+' = Derivationally related
-    const simPointers: string[] = cfg.get("thesaurus.similarityPointers", [
-      "&",
-      "^",
-      "+",
-    ]);
+    const simPointers = getThesaurusSimilarityPointers(cfg);
     const depth: number = cfg.get("thesaurus.similarityDepth", 2);
     const maxItems = cfg.get<number>("thesaurus.maxItems", 50);
 
@@ -219,7 +214,7 @@ export class ThesaurusList extends BasicList {
     return Array.from(synonymMap.entries()).map(([lemmaKey, gloss]) => {
       const display = formatWordForDisplay(lemmaKey);
       return {
-        label: gloss ? `${display}\t${gloss}` : display,
+        label: gloss ? `${display} | ${gloss}` : display,
         filterText: display,
         data: { lemma: lemmaKey, word: display },
       };

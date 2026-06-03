@@ -1,4 +1,4 @@
-import { CompletionItemKind, VimCompleteItem, workspace } from "coc.nvim";
+import { VimCompleteItem, workspace } from "coc.nvim";
 import {
   buildDefinitionText,
   formatWordForDisplay,
@@ -72,16 +72,16 @@ export function createDictionarySource(filetypes: string[]) {
           return {
             word: display,
             abbr: display,
-            filterText: display,
+            filterText: fuzzy ? input : display,
             menu: fuzzy ? "[spell]" : posLabel ? `[${posLabel}]` : "[dict]",
             sortText: String(i).padStart(5, "0"),
-            kind: CompletionItemKind.Text,
+            kind: "Dictionary",
             info: "",
             data: { lemma },
           } as VimCompleteItem & { data: { lemma: string } };
         });
 
-      return { items, isIncomplete: false };
+      return { items, isIncomplete: fuzzy };
     },
 
     onCompleteResolve: async function (item: VimCompleteItem): Promise<void> {
@@ -96,7 +96,15 @@ export function createDictionarySource(filetypes: string[]) {
         "^",
       ]);
       const maxSynsets: number = cfg.get("definitionMaxSynsets", 8);
-      item.info = buildDefinitionText(lemma, defPointers, maxSynsets);
+      try {
+        const definition = buildDefinitionText(lemma, defPointers, maxSynsets);
+        item.info = definition;
+        item.documentation = [{ filetype: "markdown", content: definition }];
+      } catch (err) {
+        const message = `coc-writing: failed to resolve dictionary docs: ${err}`;
+        item.info = message;
+        item.documentation = [{ filetype: "markdown", content: message }];
+      }
     },
   };
 }

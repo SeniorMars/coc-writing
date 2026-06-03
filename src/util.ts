@@ -1,5 +1,9 @@
 import { Neovim } from "coc.nvim";
 
+export interface ConfigReader {
+  get<T>(section: string, defaultValue: T): T;
+}
+
 // ---------------------------------------------------------------------------
 // Lemma normalization
 // ---------------------------------------------------------------------------
@@ -60,6 +64,13 @@ export function applyCapType(str: string, cap: CapType): string {
     default:
       return str;
   }
+}
+
+export function getThesaurusSimilarityPointers(cfg: ConfigReader): string[] {
+  const mode = cfg.get<string>("thesaurus.mode", "custom");
+  if (mode === "focused") return ["&", "^"];
+  if (mode === "broad") return ["&", "^", "+"];
+  return cfg.get<string[]>("thesaurus.similarityPointers", ["&", "^", "+"]);
 }
 
 // ---------------------------------------------------------------------------

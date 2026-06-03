@@ -1,7 +1,9 @@
 src
 node_modules
+tests
 tsconfig.json
 *.map
+*.tgz
 .tags
 .DS_Store
 webpack.config.js

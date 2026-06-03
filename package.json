@@ -1,6 +1,6 @@
 {
   "name": "coc-writing",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "WordNet-powered dictionary and thesaurus completion for coc.nvim",
   "author": "SeniorMars <cjh16@rice.edu>",
   "license": "MIT",
@@ -19,6 +19,7 @@
   "scripts": {
     "watch": "node esbuild.mjs --watch",
     "build": "node esbuild.mjs",
+    "test": "node tests/wordnet-fuzzy.test.mjs",
     "prepare": "node esbuild.mjs"
   },
   "devDependencies": {
@@ -47,6 +48,10 @@
       {
         "command": "coc-writing.health",
         "title": "Show coc-writing runtime status"
+      },
+      {
+        "command": "coc-writing.warmSpellingIndex",
+        "title": "Build coc-writing spelling correction index"
       }
     ],
     "configuration": {
@@ -100,6 +105,14 @@
           "default": true,
           "description": "Enable dictionary completion source (prefix word matching with definitions)."
         },
+        "coc-writing.dictionary.filetypes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Filetypes where dictionary completion is active. Empty means inherit coc-writing.filetypes."
+        },
         "coc-writing.dictionary.minInputLength": {
           "type": "number",
           "default": 3,
@@ -120,12 +133,20 @@
         "coc-writing.dictionary.list.showGlosses": {
           "type": "boolean",
           "default": true,
-          "description": "Show a short definition beside each word in :CocList writing-dictionary. Disable if interactive search feels slow."
+          "description": "Show a short definition beside each word in :CocList writingDictionary. Disable if interactive search feels slow."
         },
         "coc-writing.thesaurus.enable": {
           "type": "boolean",
           "default": false,
-          "markdownDescription": "Enable thesaurus inline completion. Disabled by default — use `:CocCommand coc-writing.searchThesaurus` or `:CocList writing-thesaurus` for intentional synonym lookup."
+          "markdownDescription": "Enable thesaurus inline completion. Disabled by default — use `:CocCommand coc-writing.searchThesaurus` or `:CocList writingThesaurus` for intentional synonym lookup."
+        },
+        "coc-writing.thesaurus.filetypes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Filetypes where thesaurus completion is active. Empty means inherit coc-writing.filetypes."
         },
         "coc-writing.thesaurus.minInputLength": {
           "type": "number",
@@ -143,6 +164,16 @@
           "type": "number",
           "default": 30,
           "description": "Thesaurus completion source priority. Restart coc to apply."
+        },
+        "coc-writing.thesaurus.mode": {
+          "type": "string",
+          "default": "custom",
+          "enum": [
+            "focused",
+            "broad",
+            "custom"
+          ],
+          "markdownDescription": "Which WordNet relations power thesaurus results.\n\n- `focused` — `&`, `^` only; closer to blink-cmp-words defaults and usually less noisy.\n- `broad` — `&`, `^`, `+`; includes derivationally related forms.\n- `custom` — use coc-writing.thesaurus.similarityPointers."
         },
         "coc-writing.thesaurus.similarityPointers": {
           "type": "array",
@@ -172,6 +203,17 @@
           "default": 5,
           "minimum": 3,
           "description": "Minimum input length before fuzzy fallback activates. Lower values trigger fuzzy earlier but may produce noisy results on short inputs."
+        },
+        "coc-writing.dictionary.fuzzy.warmSpellingIndex": {
+          "type": "boolean",
+          "default": true,
+          "description": "Build the heavier whole-word spelling correction index in the background after startup. Startup stays fast; spelling fallback becomes ready shortly after load."
+        },
+        "coc-writing.dictionary.fuzzy.warmSpellingDelay": {
+          "type": "number",
+          "default": 1000,
+          "minimum": 0,
+          "description": "Delay in milliseconds before warming the spelling correction index after WordNet loads."
         },
         "coc-writing.dictionary.includeMultiword": {
           "type": "boolean",

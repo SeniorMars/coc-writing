@@ -60,6 +60,8 @@ function isPOS(value: string): value is POS {
 export interface IndexEntry {
   pos: POS;
   offsets: number[];
+  senseCount: number;
+  tagSenseCount: number;
 }
 export interface Pointer {
   symbol: string;
@@ -83,14 +85,19 @@ let sortedKeys: string[] = [];
 let dataDir = "";
 let loaded = false;
 let loadPromise: Promise<void> | null = null;
+let deleteIndexPromise: Promise<void> | null = null;
 
 const synsetCache = new Map<string, Synset | null>();
 const dataFds = new Map<POSFile, number>();
 // First-gloss cache shared across all callers (lists, health command)
 const glossCache = new Map<string, string>();
+const fuzzyPrefixCache = new Map<string, string[]>();
+const FUZZY_PREFIX_CACHE_LIMIT = 200;
+const FUZZY_PREFIX_SCORE_CUTOFF = 180;
 
 // SymSpell-style delete index: delete-variant -> original lemmas
 let deleteIndex = new Map<string, string[]>();
+let deleteIndexBuilt = false;
 // ---------------------------------------------------------------------------
 // Public state API
 // ---------------------------------------------------------------------------
@@ -105,6 +112,8 @@ export interface WordNetStats {
   lemmaCount: number;
   synsetCacheSize: number;
   glossCacheSize: number;
+  fuzzyPrefixCacheSize: number;
+  deleteIndexBuilt: boolean;
   deleteIndexSize: number;
   openFiles: number;
 }
@@ -116,6 +125,8 @@ export function getWordNetStats(): WordNetStats {
     lemmaCount: index.size,
     synsetCacheSize: synsetCache.size,
     glossCacheSize: glossCache.size,
+    fuzzyPrefixCacheSize: fuzzyPrefixCache.size,
+    deleteIndexBuilt,
     deleteIndexSize: deleteIndex.size,
     openFiles: dataFds.size,
   };
@@ -150,7 +161,10 @@ export async function loadIndex(dir: string): Promise<void> {
       // Atomic commit: only update global state if all files parsed successfully.
       index = nextIndex;
       sortedKeys = Array.from(index.keys()).sort();
-      deleteIndex = buildDeleteIndex(2);
+      fuzzyPrefixCache.clear();
+      deleteIndex.clear();
+      deleteIndexBuilt = false;
+      deleteIndexPromise = null;
       loaded = true;
     } catch (err) {
       // Reset so a future call can retry cleanly.
@@ -158,7 +172,10 @@ export async function loadIndex(dir: string): Promise<void> {
       dataDir = "";
       index.clear();
       sortedKeys = [];
+      fuzzyPrefixCache.clear();
       deleteIndex.clear();
+      deleteIndexBuilt = false;
+      deleteIndexPromise = null;
       loaded = false;
       throw err;
     }
@@ -177,7 +194,10 @@ export function closeWordNet(): void {
   dataFds.clear();
   synsetCache.clear();
   glossCache.clear();
+  fuzzyPrefixCache.clear();
   deleteIndex.clear();
+  deleteIndexBuilt = false;
+  deleteIndexPromise = null;
   index.clear();
   sortedKeys = [];
   dataDir = "";
@@ -209,7 +229,14 @@ async function parseIndexFileInto(
 
     if (Number.isNaN(synsetCnt) || Number.isNaN(pCnt)) continue;
 
-    const offsetStart = 4 + pCnt + 2;
+    const senseCountIdx = 4 + pCnt;
+    const tagSenseCountIdx = senseCountIdx + 1;
+    const senseCount = Number.parseInt(parts[senseCountIdx] ?? "0", 10);
+    const tagSenseCount = Number.parseInt(
+      parts[tagSenseCountIdx] ?? "0",
+      10,
+    );
+    const offsetStart = tagSenseCountIdx + 1;
     const offsets = parts
       .slice(offsetStart, offsetStart + synsetCnt)
       .map(Number)
@@ -217,7 +244,12 @@ async function parseIndexFileInto(
 
     if (offsets.length === 0) continue;
 
-    const entry: IndexEntry = { pos, offsets };
+    const entry: IndexEntry = {
+      pos,
+      offsets,
+      senseCount: Number.isNaN(senseCount) ? offsets.length : senseCount,
+      tagSenseCount: Number.isNaN(tagSenseCount) ? 0 : tagSenseCount,
+    };
     const existing = target.get(lemma);
     if (existing) existing.push(entry);
     else target.set(lemma, [entry]);
@@ -361,6 +393,32 @@ function buildDeleteIndex(maxDistance: number): Map<string, string[]> {
   return out;
 }
 
+function ensureDeleteIndex(): void {
+  if (deleteIndexBuilt) return;
+  deleteIndex = buildDeleteIndex(2);
+  deleteIndexBuilt = true;
+}
+
+export function warmSpellingIndex(): Promise<void> {
+  if (deleteIndexBuilt) return Promise.resolve();
+  if (deleteIndexPromise) return deleteIndexPromise;
+
+  deleteIndexPromise = new Promise((resolve, reject) => {
+    setTimeout(() => {
+      try {
+        ensureDeleteIndex();
+        resolve();
+      } catch (err) {
+        reject(err);
+      } finally {
+        deleteIndexPromise = null;
+      }
+    }, 0);
+  });
+
+  return deleteIndexPromise;
+}
+
 // ---------------------------------------------------------------------------
 // Damerau-Levenshtein distance (transpositions count as one edit)
 // ---------------------------------------------------------------------------
@@ -399,6 +457,50 @@ function commonPrefixLength(a: string, b: string): number {
   return i;
 }
 
+function lowerBoundKey(key: string): number {
+  let lo = 0;
+  let hi = sortedKeys.length;
+
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (sortedKeys[mid] < key) lo = mid + 1;
+    else hi = mid;
+  }
+
+  return lo;
+}
+
+function lemmaFrequencyBonus(lemma: string): number {
+  const entries = lookupWord(lemma);
+  let tagSenseCount = 0;
+  let senseCount = 0;
+
+  for (const entry of entries) {
+    tagSenseCount += entry.tagSenseCount;
+    senseCount += entry.senseCount;
+  }
+
+  // `tagSenseCount` is corpus evidence; `senseCount` is a weaker fallback.
+  // Keep the bonus bounded so frequency only breaks close fuzzy matches.
+  return Math.min(
+    Math.log1p(tagSenseCount) * 8 + Math.log1p(senseCount) * 2,
+    25,
+  );
+}
+
+function getCachedFuzzyPrefix(cacheKey: string, limit: number): string[] | null {
+  const cached = fuzzyPrefixCache.get(cacheKey);
+  return cached ? cached.slice(0, limit) : null;
+}
+
+function setCachedFuzzyPrefix(cacheKey: string, words: string[]): void {
+  if (fuzzyPrefixCache.size >= FUZZY_PREFIX_CACHE_LIMIT) {
+    const oldest = fuzzyPrefixCache.keys().next().value;
+    if (oldest !== undefined) fuzzyPrefixCache.delete(oldest);
+  }
+  fuzzyPrefixCache.set(cacheKey, words);
+}
+
 // ---------------------------------------------------------------------------
 // Spelling suggestions + fuzzy prefix search
 // ---------------------------------------------------------------------------
@@ -421,6 +523,8 @@ export function getSpellingSuggestions(
 ): string[] {
   const query = normalizeLemma(input);
   if (query.length < 4) return [];
+
+  ensureDeleteIndex();
 
   // Use tighter distance for short words — edit distance 2 is too permissive on 4-5 letter words.
   const effectiveMaxDistance = query.length <= 5 ? 1 : maxDistance;
@@ -449,8 +553,9 @@ export function getSpellingSuggestions(
     const lengthPenalty = Math.abs(lemma.length - query.length);
     // Prefer plain words over hyphenated/apostrophe forms
     const punctuationPenalty = /[-']/.test(lemma) ? 3 : 0;
+    const frequencyBonus = lemmaFrequencyBonus(lemma);
     const score = distance * 100 - prefixBonus * 5 + lengthPenalty * 2 +
-      punctuationPenalty;
+      punctuationPenalty - frequencyBonus;
     scored.push({ lemma, score });
   }
 
@@ -460,10 +565,104 @@ export function getSpellingSuggestions(
   return scored.slice(0, limit).map((x) => x.lemma);
 }
 
+function scoreFuzzyPrefix(
+  query: string,
+  lemma: string,
+  maxDistance: number,
+  allowFirstLetterMismatch: boolean,
+): number | null {
+  if (!allowFirstLetterMismatch && lemma[0] !== query[0]) return null;
+
+  const minPrefixLength = Math.max(1, query.length - maxDistance);
+  const maxPrefixLength = Math.min(lemma.length, query.length + maxDistance);
+  let bestScore: number | null = null;
+
+  for (let len = minPrefixLength; len <= maxPrefixLength; len++) {
+    const prefix = lemma.slice(0, len);
+    const distance = damerauLevenshtein(query, prefix, maxDistance);
+    if (distance > maxDistance) continue;
+
+    const prefixBonus = commonPrefixLength(query, prefix);
+    const lengthPenalty = Math.abs(prefix.length - query.length);
+    const tailPenalty = Math.min(lemma.length - prefix.length, 8);
+    const punctuationPenalty = /[-']/.test(lemma) ? 3 : 0;
+    const frequencyBonus = lemmaFrequencyBonus(lemma);
+    const firstLetterPenalty = lemma[0] === query[0] ? 0 : 45;
+    const score = distance * 100 - prefixBonus * 6 + lengthPenalty * 5 +
+      tailPenalty * 4 + punctuationPenalty + firstLetterPenalty -
+      frequencyBonus;
+
+    if (bestScore === null || score < bestScore) bestScore = score;
+  }
+
+  return bestScore;
+}
+
+/**
+ * Fuzzy prefix completion for misspelled stems.
+ *
+ * Unlike `getSpellingSuggestions`, this compares the query to candidate word
+ * prefixes, so a mistyped partial word can still complete to a longer lemma.
+ */
+export function getFuzzyPrefixSuggestions(
+  input: string,
+  limit: number,
+  maxDistance = 2,
+): string[] {
+  const query = normalizeLemma(input);
+  if (query.length < 4 || !/^[a-z]/.test(query)) return [];
+
+  const cacheKey = `${query}|${limit}|${maxDistance}`;
+  const cached = getCachedFuzzyPrefix(cacheKey, limit);
+  if (cached) return cached;
+
+  // Use tighter distance for short words — edit distance 2 is too permissive on 4-5 letter words.
+  const effectiveMaxDistance = query.length <= 5 ? 1 : maxDistance;
+  const allowFirstLetterMismatch = query.length >= 7;
+  const first = query[0];
+  const start = allowFirstLetterMismatch ? 0 : lowerBoundKey(first);
+  const end = allowFirstLetterMismatch
+    ? sortedKeys.length
+    : lowerBoundKey(String.fromCharCode(first.charCodeAt(0) + 1));
+  const scored: Array<{ lemma: string; score: number }> = [];
+
+  for (let i = start; i < end; i++) {
+    const lemma = sortedKeys[i];
+    if (lemma.length < query.length - effectiveMaxDistance) continue;
+    if (lemma.includes("_")) continue;
+    if (!/^[a-z'-]+$/.test(lemma)) continue;
+
+    const score = scoreFuzzyPrefix(
+      query,
+      lemma,
+      effectiveMaxDistance,
+      allowFirstLetterMismatch,
+    );
+    if (score !== null) scored.push({ lemma, score });
+  }
+
+  scored.sort((a, b) =>
+    a.score !== b.score ? a.score - b.score : a.lemma.localeCompare(b.lemma)
+  );
+
+  const bestScore = scored[0]?.score;
+  const words = bestScore === undefined
+    ? []
+    : scored
+      .filter((x) =>
+        x.score <= FUZZY_PREFIX_SCORE_CUTOFF && x.score <= bestScore + 80
+      )
+      .slice(0, limit)
+      .map((x) => x.lemma);
+
+  setCachedFuzzyPrefix(cacheKey, words);
+  return words;
+}
+
 /**
  * Prefix search with SymSpell spell-correction fallback.
  * Returns exact prefix matches when any exist; otherwise spelling suggestions
- * ranked by Damerau-Levenshtein distance.
+ * ranked by fuzzy-prefix and Damerau-Levenshtein distance.
  */
 export function getWordsWithFuzzyPrefix(
   input: string,
@@ -471,6 +670,9 @@ export function getWordsWithFuzzyPrefix(
 ): { words: string[]; fuzzy: boolean } {
   const exact = getWordsWithPrefix(input, limit);
   if (exact.length > 0) return { words: exact, fuzzy: false };
+
+  const fuzzyPrefix = getFuzzyPrefixSuggestions(input, limit, 2);
+  if (fuzzyPrefix.length > 0) return { words: fuzzyPrefix, fuzzy: true };
 
   const spelling = getSpellingSuggestions(input, limit, 2);
   if (spelling.length > 0) return { words: spelling, fuzzy: true };
@@ -585,7 +787,7 @@ export function buildDefinitionText(
   const entries = lookupWord(lemma);
   if (entries.length === 0) return "";
 
-  const blocks: string[] = [];
+  const blocks: string[] = [`## ${formatWordForDisplay(lemma)}`];
   let n = 0;
   let truncated = false;
 
@@ -615,10 +817,12 @@ export function buildDefinitionText(
         ptrGroups.set(ptr.symbol, existing);
       }
 
-      let block = `${n}. [${posLabel}] ${wordList}:\n${synset.gloss}`;
+      let block = `${n}. **[${posLabel}]** ${wordList}\n\n${synset.gloss}`;
       for (const [sym, words] of ptrGroups) {
-        const label = (POINTER_LABEL[sym] ?? sym).toLowerCase();
-        block += `\n\`${label}\`: ${Array.from(words).slice(0, 8).join(", ")}`;
+        const label = POINTER_LABEL[sym] ?? sym;
+        block += `\n\n- **${label}:** ${
+          Array.from(words).slice(0, 8).join(", ")
+        }`;
       }
       blocks.push(block);
     }
@@ -628,7 +832,7 @@ export function buildDefinitionText(
     blocks.push(`_Showing first ${maxSynsets} senses only._`);
   }
 
-  return blocks.join("\n───\n\n") + (blocks.length > 0 ? "\n───" : "");
+  return blocks.join("\n\n---\n\n");
 }
 
 // ---------------------------------------------------------------------------

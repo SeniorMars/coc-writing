@@ -18,23 +18,29 @@ import {
   isLoaded,
   loadIndex,
   lookupWord,
+  warmSpellingIndex,
 } from "./wordnet";
 import { createDictionarySource } from "./dictionary";
 import { createThesaurusSource } from "./thesaurus";
 import { DictionaryList, ThesaurusList } from "./lists";
-import { openPreviewBuffer } from "./util";
+import { getThesaurusSimilarityPointers, openPreviewBuffer } from "./util";
 
 export async function activate(context: ExtensionContext): Promise<void> {
   const config = workspace.getConfiguration("coc-writing");
   if (!config.get<boolean>("enable", true)) return;
 
-  const filetypes = config.get<string[]>("filetypes", [
+  const defaultFiletypes = config.get<string[]>("filetypes", [
     "markdown",
     "text",
     "tex",
     "plaintex",
     "gitcommit",
   ]);
+  const dictionaryFiletypes = config.get<string[]>(
+    "dictionary.filetypes",
+    [],
+  );
+  const thesaurusFiletypes = config.get<string[]>("thesaurus.filetypes", []);
 
   const dataDir = context.asAbsolutePath("data");
   const nvim = workspace.nvim;
@@ -44,6 +50,21 @@ export async function activate(context: ExtensionContext): Promise<void> {
       if (config.get<boolean>("debug", false)) {
         window.showInformationMessage("coc-writing: WordNet loaded");
       }
+      if (config.get<boolean>("dictionary.fuzzy.warmSpellingIndex", true)) {
+        const delay = config.get<number>(
+          "dictionary.fuzzy.warmSpellingDelay",
+          1000,
+        );
+        setTimeout(() => {
+          warmSpellingIndex().catch((err) => {
+            if (config.get<boolean>("debug", false)) {
+              window.showWarningMessage(
+                `coc-writing: failed to warm spelling index: ${err}`,
+              );
+            }
+          });
+        }, Math.max(0, delay));
+      }
     })
     .catch((err) => {
       window.showErrorMessage(
@@ -52,8 +73,16 @@ export async function activate(context: ExtensionContext): Promise<void> {
     });
 
   context.subscriptions.push(
-    sources.createSource(createDictionarySource(filetypes)),
-    sources.createSource(createThesaurusSource(filetypes)),
+    sources.createSource(
+      createDictionarySource(
+        dictionaryFiletypes.length > 0 ? dictionaryFiletypes : defaultFiletypes,
+      ),
+    ),
+    sources.createSource(
+      createThesaurusSource(
+        thesaurusFiletypes.length > 0 ? thesaurusFiletypes : defaultFiletypes,
+      ),
+    ),
     listManager.registerList(new DictionaryList(nvim)),
     listManager.registerList(new ThesaurusList(nvim)),
     commands.registerCommand("coc-writing.searchDictionary", async () => {
@@ -152,11 +181,7 @@ export async function activate(context: ExtensionContext): Promise<void> {
       }
 
       const cfg = workspace.getConfiguration("coc-writing");
-      const simPointers: string[] = cfg.get("thesaurus.similarityPointers", [
-        "&",
-        "^",
-        "+",
-      ]);
+      const simPointers = getThesaurusSimilarityPointers(cfg);
       const depth: number = cfg.get("thesaurus.similarityDepth", 2);
 
       const synonymMap = collectSynonymsForWord(word, simPointers, depth, 100);
@@ -197,7 +222,7 @@ export async function activate(context: ExtensionContext): Promise<void> {
 
       if (start >= 0) {
         const newLine = line.slice(0, start) + replacement + line.slice(end);
-        await nvim.call("setline", [".", newLine]);
+        await nvim.call("setline", [pos[1], newLine]);
         await nvim.call("cursor", [pos[1], start + replacement.length + 1]);
       } else {
         // Cursor moved off the word during quickpick — insert at cursor position
@@ -252,7 +277,9 @@ export async function activate(context: ExtensionContext): Promise<void> {
         `lemmas indexed:   ${stats.lemmaCount.toLocaleString()}`,
         `synsets cached:   ${stats.synsetCacheSize.toLocaleString()}`,
         `glosses cached:   ${stats.glossCacheSize.toLocaleString()}`,
-        `delete keys:      ${stats.deleteIndexSize.toLocaleString()}`,
+        `fuzzy cached:     ${stats.fuzzyPrefixCacheSize.toLocaleString()}`,
+        `spelling built:   ${stats.deleteIndexBuilt}`,
+        `spelling keys:    ${stats.deleteIndexSize.toLocaleString()}`,
         `open data fds:    ${stats.openFiles}`,
         "",
         "## Data files",
@@ -268,6 +295,14 @@ export async function activate(context: ExtensionContext): Promise<void> {
         "",
         "## Config",
         `filetypes:        ${(cfg.get<string[]>("filetypes", [])).join(", ")}`,
+        `dict filetypes:   ${
+          (cfg.get<string[]>("dictionary.filetypes", [])).join(", ") ||
+          "(inherit)"
+        }`,
+        `thes filetypes:   ${
+          (cfg.get<string[]>("thesaurus.filetypes", [])).join(", ") ||
+          "(inherit)"
+        }`,
         `minInputLength:   ${cfg.get("dictionary.minInputLength", 3)}`,
         `maxItems:         dict=${cfg.get("dictionary.maxItems", 50)}, thes=${
           cfg.get("thesaurus.maxItems", 50)
@@ -279,13 +314,22 @@ export async function activate(context: ExtensionContext): Promise<void> {
           (cfg.get<string[]>("definitionPointers", ["!", "&", "^"])).join(" ")
         }`,
         `definitionMaxSynsets: ${cfg.get("definitionMaxSynsets", 8)}`,
-        `similarityPointers: ${
-          (cfg.get<string[]>("thesaurus.similarityPointers", ["&", "^", "+"]))
-            .join(" ")
-        }`,
+        `thesaurusMode:    ${cfg.get("thesaurus.mode", "custom")}`,
+        `similarityPointers: ${getThesaurusSimilarityPointers(cfg).join(" ")}`,
       ];
 
       await openPreviewBuffer(nvim, lines);
+    }),
+    commands.registerCommand("coc-writing.warmSpellingIndex", async () => {
+      if (!isLoaded()) {
+        window.showWarningMessage(
+          "coc-writing: WordNet index is still loading",
+        );
+        return;
+      }
+
+      await warmSpellingIndex();
+      window.showInformationMessage("coc-writing: spelling index warmed");
     }),
   );
 }

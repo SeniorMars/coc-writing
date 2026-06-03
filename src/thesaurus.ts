@@ -1,4 +1,4 @@
-import { CompletionItemKind, VimCompleteItem, workspace } from "coc.nvim";
+import { VimCompleteItem, workspace } from "coc.nvim";
 import {
   buildDefinitionText,
   collectSynonymsForWord,
@@ -7,10 +7,12 @@ import {
   isLoaded,
   lookupWord,
 } from "./wordnet";
-import { applyCapType, getCapType, normalizeLemma } from "./util";
-
-// '&' = Similar to (adjective clusters), '^' = Also see, '+' = Derivationally related
-const DEFAULT_SIM_POINTERS = ["&", "^", "+"];
+import {
+  applyCapType,
+  getCapType,
+  getThesaurusSimilarityPointers,
+  normalizeLemma,
+} from "./util";
 
 export function createThesaurusSource(filetypes: string[]) {
   const config = workspace.getConfiguration("coc-writing");
@@ -35,10 +37,7 @@ export function createThesaurusSource(filetypes: string[]) {
       const minLen = cfg.get<number>("thesaurus.minInputLength", 4);
       if (input.length < minLen) return null;
 
-      const simPointers: string[] = cfg.get(
-        "thesaurus.similarityPointers",
-        DEFAULT_SIM_POINTERS,
-      );
+      const simPointers = getThesaurusSimilarityPointers(cfg);
       const depth: number = cfg.get("thesaurus.similarityDepth", 2);
       const maxItems = cfg.get<number>("thesaurus.maxItems", 50);
 
@@ -64,7 +63,7 @@ export function createThesaurusSource(filetypes: string[]) {
           filterText: input,
           menu: posLabel ? `[${posLabel}~]` : "[thes]",
           sortText: String(i).padStart(5, "0"),
-          kind: CompletionItemKind.Text,
+          kind: "Thesaurus",
           info: "",
           data: { lemma: lemmaKey, query: normalizeLemma(input) },
         } as VimCompleteItem & { data: { lemma: string; query: string } };
@@ -89,17 +88,25 @@ export function createThesaurusSource(filetypes: string[]) {
       ]);
       const maxSynsets: number = cfg.get("definitionMaxSynsets", 8);
 
-      const synonymDef = buildDefinitionText(lemma, defPointers, maxSynsets);
-      const queryDef = query !== lemma
-        ? buildDefinitionText(query, defPointers, maxSynsets)
-        : "";
+      try {
+        const synonymDef = buildDefinitionText(lemma, defPointers, maxSynsets);
+        const queryDef = query !== lemma
+          ? buildDefinitionText(query, defPointers, maxSynsets)
+          : "";
 
-      item.info = synonymDef +
-        (queryDef
-          ? `\n\n─── (your word: ${
-            formatWordForDisplay(query)
-          }) ───\n\n${queryDef}`
-          : "");
+        const definition = synonymDef +
+          (queryDef
+            ? `\n\n---\n\n## Your word: ${
+              formatWordForDisplay(query)
+            }\n\n${queryDef}`
+            : "");
+        item.info = definition;
+        item.documentation = [{ filetype: "markdown", content: definition }];
+      } catch (err) {
+        const message = `coc-writing: failed to resolve thesaurus docs: ${err}`;
+        item.info = message;
+        item.documentation = [{ filetype: "markdown", content: message }];
+      }
     },
   };
 }
